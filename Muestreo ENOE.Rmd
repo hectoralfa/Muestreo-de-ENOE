@@ -1,0 +1,139 @@
+---
+title: "Practica 1"
+author: "Olivares García Héctor"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(survey)
+library(knitr)
+library(kableExtra)
+kable(iris) %>%
+  kable_styling(latex_options = "striped")
+rm(list=ls())
+gc()
+```
+
+# ENOE 
+
+La Encuesta Nacional de Ocupación y Empleo (ENOE) es la principal fuente de información sobre el mercado laboral mexicano al ofrecer datos mensuales y trimestrales de la fuerza de trabajo, la ocupación, la informalidad laboral, la subocupación y la desocupación. 
+
+El objetivo de esta práctica es replicar las estimaciones del archivo `2020_trim_4_Nacional.xls` correspondientes al cuarto trimestre de 2020 de la ENOE.
+
+La documentación, tabulados y microdatos se pueden encontrar en el siguiente enlace <https://www.inegi.org.mx/programas/enoe/15ymas/>
+
+Resultados del cuarto trimestre de 2020 <https://www.inegi.org.mx/contenidos/programas/enoe/15ymas/doc/enoe_n_presentacion_ejecutiva_trim4.pdf>
+
+## DISEÑO MUESTRAL 
+
+El diseño muestral de la ENOE se carácteriza por ser probabilístico, por lo cual los resultados obtenidos de la encuesta se generalizan a toda la población, a su vez es bietápico, estratificado y por conglomerados, donde la unidad última de observación es la persona que al momento de la entrevista tenga 15 años cumplidos o más de edad.
+
+<https://www.inegi.org.mx/contenidos/productos/prod_serv/contenidos/espanol/bvinegi/productos/nueva_estruc/702825190613.pdf>
+
+## BASE DE DATOS
+La base de datos de la ENOE está conformada por cinco tablas:
+
+1. Vivienda      
+2. Hogar       
+3. Sociodemográfico
+4. Cuestionario de ocupación y empleo parte I    
+5. Cuestionario de ocupación y empleo parte II                   
+
+Para replicar las estimaciones del archivo `2020_trim_4_Nacional.xls` se trabajará con la base Sociodemográfica `ENOEN_SDEMT420.csv`
+
+<https://www.inegi.org.mx/contenidos/programas/enoe/15ymas/doc/enoe_n_fd_c_bas_amp.pdf>
+
+## VARIABLES DE INTERÉS
+
+La base Sociodemográfico `ENOEN_SDEMT420.csv` consta de 110 variables de las cuales las siguentes son de nuestro interés:
+
+  - **ca**: Registro por panel.
+  - **upm**: Número de la unidad primaria de muestreo.
+  - **est_d_tri**: Número del estrato de diseño trimestral.
+  - **fac_tri**: Ponderador que permite obtener los resultados trimestrales.
+  - **clase1**: Clasificación de la población en **PEA** (Población económicamente activa) y **PNEA** (Población no económicamente activa).
+  - **clase2**: Clasificación de la población en **PO** (ocupada) y **PD** (desocupada), **D** (disponible) y **ND** (no disponible).
+  - **sex**: Sexo
+  - **r_def**: Resultado definitivo de la entrevista.
+  - **c_res**: Condición de residencia.
+  - **eda**: edad.
+  
+### CONSIDERACIONES
+
+  - Las variables clase1 y clase2 son variables precodificadas. Para el uso de las variables se debe aplicar el siguiente criterio: R_DEF = 00 (Entrevista completa), C_RES = 1 o 3 (Residente habitual o Nuevo residente) y EDAD 15 a 98 AÑOS.
+
+  - Para el cálculo de las precisiones estadísticas ya sea para el periodo mensual o trimestral, se debe considerar como unidad primaria de muestreo, los campos CA+UPM, lo cual permite identificar de manera única cada UPM.
+  
+```{r, echo=TRUE, eval=TRUE}
+base <- read.csv('ENOEN_sdemt420.csv', header=TRUE, sep=",", na.strings="NA", dec=".") %>% 
+  dplyr::filter(ï..r_def==0 & (c_res==1 | c_res==3) & (eda>=15 & eda<=98)) %>%
+  mutate(ca_upm = paste(ca, upm, sep="_")) %>% 
+  select(ca_upm,est_d_tri, fac_tri, clase1, clase2,sex)
+
+base$clase1 <- factor(base$clase1, labels= c("PEA","PNEA"))
+base$clase2 <- factor(base$clase2, labels= c("PO","PD","D","ND"))
+base$sex <- factor(base$sex, labels= c("Hombre","Mujer"))
+
+```
+
+### APLICACION CON SURVEY
+
+```{r, echo=TRUE, eval=TRUE}
+options(survey.lonely.psu="adjust")
+ENOE <- svydesign(data = base,
+                  strat = ~est_d_tri,
+                  id = ~ca_upm, nest=TRUE,
+                  weight = ~fac_tri)
+
+total_c1 <- svytotal(~clase1, ENOE) %>% as.data.frame()
+total_c2 <- svytotal(~clase2, ENOE) %>% as.data.frame()
+
+intc_c1 <- confint(svytotal(~clase1, ENOE), df=degf(ENOE),level=0.9) %>% as.data.frame()
+intc_c2 <- confint(svytotal(~clase2, ENOE), df=degf(ENOE),level=0.9) %>% as.data.frame()
+```
+
+#### PEA Y PNEA (CLASE1)
+
+```{r, echo=FALSE, eval=TRUE,fig.align = 'center'}
+tab_c1 <- svytable(~clase1, design = ENOE) %>%
+  as.data.frame() %>%
+  rename(Total=Freq) %>%
+  mutate(SE=total_c1$SE, LIIC = intc_c1$`5 %`, LSIC = intc_c1$`95 %`, Proporcion = Total / sum(Total)) %>%
+  arrange(desc(Proporcion))
+
+kable(tab_c1) %>%
+  kable_styling(font_size = 12)
+
+ggplot(data = tab_c1, mapping = aes(x=clase1, y = Proporcion, fill=clase1))+
+  geom_col(show.legend = FALSE)+
+  scale_fill_brewer()+
+  geom_text(aes(label = scales::percent(Proporcion)), position = position_stack(.5))+
+  theme_minimal()
+
+
+(tab_clxsex <- svytotal(x=~interaction(clase1,sex),
+                        design = ENOE,
+                        na.rm= T))
+```
+
+#### PO y PD, D y ND (CLASE 2)
+
+```{r, echo=FALSE, eval=TRUE, fig.align = 'center'}
+tab_c2 <- svytable(~clase2, design = ENOE) %>%
+  as.data.frame() %>%
+  rename(Total=Freq) %>%
+  mutate(SE=total_c2$SE, LIIC = intc_c2$`5 %`, LSIC = intc_c2$`95 %`, Proporcion = Total / sum(Total)) %>%
+  arrange(desc(Proporcion))
+
+kable(tab_c2) %>%
+  kable_styling(font_size = 12)
+
+ggplot(data = tab_c2, mapping = aes(x=clase2, y = Proporcion, fill=clase2))+
+  geom_col(show.legend = FALSE)+
+  scale_fill_brewer()+
+  geom_text(aes(label = scales::percent(Proporcion)), position = position_stack(.5))+
+  theme_minimal()
+```
+
+
